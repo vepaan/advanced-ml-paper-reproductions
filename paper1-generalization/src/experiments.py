@@ -9,8 +9,7 @@ Example (Colab):
       --output-root /content/figure1_runs \
       --backup-root /content/drive/MyDrive/ML-Paper-Reproductions/figure1
 
-Re-running the same command skips verified completed backups. There is no
-mid-epoch/epoch checkpointing: interrupted individual jobs restart from scratch.
+Re-running the same command skips verified completed backups. Epoch-boundary checkpoints can be persisted separately to Drive for resume.
 """
 from __future__ import annotations
 
@@ -98,7 +97,7 @@ def summarize(output_root: Path) -> int:
     for meta_path in sorted(output_root.rglob("metadata.json")) if output_root.exists() else []:
         folder = meta_path.parent
         # Ignore abandoned/incomplete archives when building the final summary.
-        if any(".incomplete-" in part for part in folder.parts):
+        if any(".incomplete-" in part or ".previous-" in part for part in folder.parts):
             continue
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -165,6 +164,20 @@ def expected_config(args: argparse.Namespace, job: Job, epochs: int) -> dict:
         "data_root": args.data_root,
         "device": args.device,
     }
+
+
+def is_extendable(folder: Path, expected: dict) -> bool:
+    """Whether a finished run covers the requested budget, ignoring higher new epoch limit."""
+    if status_of(folder) != "complete":
+        return False
+    try:
+        meta = json.loads((folder / "metadata.json").read_text())
+        if any(meta["config"].get(k) != v for k, v in expected.items() if k != "epochs"):
+            return False
+        return (meta.get("convergence_step") is not None or
+                int(meta.get("total_steps", 0)) > 0)
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def matching_complete(folder: Path, expected: dict) -> bool:
@@ -245,7 +258,7 @@ def backup_completed(source: Path, destination: Path, expected: dict) -> None:
             shutil.rmtree(staging)
 
 
-def command_for(args: argparse.Namespace, job: Job, epochs: int, folder: Path) -> list[str]:
+def command_for(args: argparse.Namespace, job: Job, epochs: int, folder: Path, checkpoint: Path | None = None, resume: Path | None = None) -> list[str]:
     cmd = [sys.executable, str(TRAIN_SCRIPT), "--model", job.model,
            "--condition", job.condition, "--corruption-probability", str(job.probability),
            "--epochs", str(epochs), "--batch-size", str(args.batch_size),
@@ -264,6 +277,11 @@ def command_for(args: argparse.Namespace, job: Job, epochs: int, folder: Path) -
             cmd.extend((flag, str(value)))
     if args.stop_on_convergence:
         cmd.append("--stop-on-convergence")
+    if checkpoint:
+        cmd.extend(("--checkpoint-path", str(checkpoint),
+                    "--checkpoint-interval", str(args.checkpoint_interval)))
+    if resume:
+        cmd.extend(("--resume-checkpoint", str(resume)))
     return cmd
 
 
@@ -301,6 +319,8 @@ def parse_args() -> argparse.Namespace:
                         help="Persistent backup root, e.g. /content/drive/MyDrive/...; copy after each job")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--summarize-only", action="store_true")
+    parser.add_argument("--checkpoint-interval", type=int, default=5,
+                        help="Save resumable checkpoint at every N completed epochs (default: 5)")
     parser.add_argument("--retry-partial", action="store_true",
                         help="Archive incompatible or incomplete local runs, then retry")
     parser.add_argument("--continue-on-error", action="store_true")
@@ -332,6 +352,8 @@ def main() -> None:
         raise SystemExit("Corruption probabilities collide after rounding to integer percentages")
     if args.epochs is not None and args.epochs < 1:
         raise SystemExit("--epochs must be positive")
+    if args.checkpoint_interval < 1:
+        raise SystemExit("--checkpoint-interval must be positive")
     if args.batch_size < 1 or args.eval_interval < 1:
         raise SystemExit("--batch-size and --eval-interval must be positive")
     epochs = args.epochs if args.epochs is not None else (1 if args.preset == "benchmark" else 100)
@@ -354,8 +376,10 @@ def main() -> None:
         folder = directory_for(root, job)
         destination = directory_for(backup, job) if backup else None
         expected = expected_config(args, job, epochs)
+        checkpoint = directory_for((backup if backup else root) / "_checkpoints", job) / "latest.pt"
         print(f"[{index}/{len(jobs)}] {job.model} {job.condition} p={job.probability:g} "
               f"-> {folder}", flush=True)
+        # Successful convergence can satisfy extended epoch budgets if early stopping is enabled.
         if destination and matching_complete(destination, expected):
             print(f"  SKIP: verified Drive backup -> {destination}", flush=True)
             continue
@@ -366,16 +390,25 @@ def main() -> None:
                 print(f"  BACKED UP -> {destination}", flush=True)
             continue
         state = status_of(folder)
-        if folder.exists() and state != "new" and not args.retry_partial:
-            print("  SKIP: local output is partial or incompatible; use --retry-partial", flush=True)
+        resume = checkpoint if checkpoint.is_file() else None
+        if folder.exists() and state != "new" and resume is None and not args.retry_partial:
+            print("  SKIP: local output is partial or incompatible and has no checkpoint; use --retry-partial", flush=True)
             continue
-        if destination and destination.exists():
+        if destination and destination.exists() and not (resume and is_extendable(destination, expected)):
             print(f"  ERROR: incompatible/partial backup exists: {destination}", file=sys.stderr)
             failures += 1
             if not args.continue_on_error:
                 break
             continue
-        cmd = command_for(args, job, epochs, folder)
+        # With a checkpoint, resume into a clean local folder restored from its logged history.
+        # If the checkpoint is already at the new budget, a larger budget is needed.
+        if resume:
+            from train import load_checkpoint
+            cp = load_checkpoint(resume)
+            if cp["epoch"] >= epochs:
+                print(f"  SKIP: checkpoint already at epoch {cp['epoch']}; increase --epochs to extend", flush=True)
+                continue
+        cmd = command_for(args, job, epochs, folder, checkpoint, resume)
         if args.dry_run:
             print("  DRY RUN:", subprocess.list2cmdline(cmd), flush=True)
             continue
@@ -388,6 +421,13 @@ def main() -> None:
                 raise RuntimeError(f"Run finished but output validation failed: {folder}")
             print(f"  COMPLETE in {time.perf_counter()-started:.1f}s", flush=True)
             if destination:
+                if destination.exists() and is_extendable(destination, expected):
+                    suffix = 1
+                    while destination.with_name(destination.name + f".previous-{suffix}").exists():
+                        suffix += 1
+                    archived = destination.with_name(destination.name + f".previous-{suffix}")
+                    destination.rename(archived)
+                    print(f"  Archived prior completed Drive result -> {archived}", flush=True)
                 backup_completed(folder, destination, expected)
                 print(f"  BACKED UP -> {destination}", flush=True)
         except (subprocess.CalledProcessError, OSError, RuntimeError) as exc:

@@ -8,6 +8,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
+import uuid
 import random
 import sys
 import time
@@ -47,6 +49,9 @@ class TrainConfig:
     data_root: str = "data"
     output_dir: str = "results/pilot"
     device: str = "cpu"
+    resume_checkpoint: str | None = None
+    checkpoint_path: str | None = None
+    checkpoint_interval: int = 5
 
 
 def set_seed(seed: int) -> None:
@@ -87,9 +92,36 @@ def append_csv(path: Path, record: dict) -> None:
         writer.writerow(record)
 
 
+def atomic_save_checkpoint(payload: dict, path: Path) -> None:
+    """Save a complete epoch-boundary checkpoint (including CSV history)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex)
+    try:
+        torch.save(payload, tmp)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def checkpoint_identity(config: TrainConfig) -> dict:
+    """Properties that must remain identical across resumed training."""
+    identity = asdict(config)
+    for key in ("epochs", "max_steps", "output_dir", "resume_checkpoint", "checkpoint_path",
+                "checkpoint_interval", "stop_on_convergence"):
+        identity.pop(key, None)
+    return identity
+
+
+def load_checkpoint(path: Path) -> dict:
+    # Checkpoints are pickle-based. Only load files created by this own training code.
+    return torch.load(path, map_location="cpu", weights_only=False)
+
+
 def run(config: TrainConfig) -> None:
     if config.model not in MODELS:
         raise ValueError(f"Unknown model {config.model}")
+    if config.checkpoint_interval < 1:
+        raise ValueError("checkpoint_interval must be positive")
     if config.epochs < 1 or config.batch_size < 1 or config.eval_interval < 1:
         raise ValueError("epochs, batch_size and eval_interval must be positive")
     if config.max_steps is not None and config.max_steps < 1:
@@ -141,9 +173,34 @@ def run(config: TrainConfig) -> None:
 
     out = Path(config.output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    for existing in ("steps.csv", "epochs.csv", "metadata.json"):
-        if (out / existing).exists():
-            raise FileExistsError(f"{out / existing} already exists; use a fresh output directory")
+    resume = load_checkpoint(Path(config.resume_checkpoint)) if config.resume_checkpoint else None
+    if resume is not None:
+        if resume["identity"] != checkpoint_identity(config):
+            raise ValueError("Checkpoint hyperparameters/data differ from requested run")
+        if config.max_steps is not None and resume["step"] >= config.max_steps:
+            raise ValueError("New max_steps must exceed checkpoint step")
+        if resume["epoch"] >= config.epochs:
+            raise ValueError("New epochs budget must exceed checkpoint epoch")
+        for name in ("steps.csv", "epochs.csv"):
+            (out / name).write_bytes(resume["logs"][name])
+        model.load_state_dict(resume["model"])
+        optimizer.load_state_dict(resume["optimizer"])
+        # Optimizer state can be loaded on CPU then moved to requested device.
+        for state in optimizer.state.values():
+            for key, val in state.items():
+                if torch.is_tensor(val):
+                    state[key] = val.to(device)
+        scheduler.load_state_dict(resume["scheduler"])
+        random.setstate(resume["python_rng"])
+        np.random.set_state(resume["numpy_rng"])
+        torch.set_rng_state(resume["torch_rng"])
+        if torch.cuda.is_available() and resume.get("cuda_rng") is not None:
+            torch.cuda.set_rng_state_all(resume["cuda_rng"])
+        train_loader.generator.set_state(resume["loader_rng"])
+    else:
+        for existing in ("steps.csv", "epochs.csv", "metadata.json"):
+            if (out / existing).exists():
+                raise FileExistsError(f"{out / existing} already exists; specify a resume checkpoint")
     metadata = {"config": asdict(config), "initial_lr": initial_lr,
                 "observed_label_change_rate": observed_change,
                 "parameter_count": count_parameters(model),
@@ -151,17 +208,27 @@ def run(config: TrainConfig) -> None:
                 "torch_version": torch.__version__, "numpy_version": np.__version__,
                 "python_version": sys.version, "utc_start": datetime.now(timezone.utc).isoformat(),
                 "convergence_step": None, "completed": False}
+    if resume is not None:
+        metadata = resume["metadata"]
+        metadata["config"] = asdict(config)
+        metadata["completed"] = False
+        metadata["stop_reason"] = "running"
+        metadata["resumed_from_epoch"] = resume["epoch"]
     (out / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print(f"Model={config.model} params={metadata['parameter_count']:,} "
           f"(paper {metadata['paper_parameter_count']:,}); device={device}; "
           f"train_examples={len(train_data)}; changed_labels={observed_change:.4f}", flush=True)
 
-    global_step = 0
-    consecutive = 0
-    started = time.perf_counter()
+    global_step = int(resume["step"]) if resume else 0
+    consecutive = int(resume["consecutive"]) if resume else 0
+    start_epoch = int(resume["epoch"]) + 1 if resume else 1
+    previous_elapsed = float(resume.get("elapsed_seconds", 0)) if resume else 0.0
+    started = time.perf_counter() - previous_elapsed
+    if resume:
+        print(f"RESUMED at epoch {resume['epoch']} step {global_step}", flush=True)
     reached_budget = False
     stopped_on_convergence = False
-    for epoch in range(1, config.epochs + 1):
+    for epoch in range(start_epoch, config.epochs + 1):
         model.train()
         for inputs, targets in train_loader:
             inputs = inputs.to(device)
@@ -206,6 +273,28 @@ def run(config: TrainConfig) -> None:
             if converged and config.stop_on_convergence:
                 stopped_on_convergence = True
                 print(f"Early stop: convergence confirmed at epoch {epoch}, step {global_step}", flush=True)
+        # Always checkpoint full epochs, including epoch-limited completed runs.
+        # An interrupted partial epoch is deliberately replayed from the prior boundary.
+        if not reached_budget and config.checkpoint_path and (
+            epoch % config.checkpoint_interval == 0 or epoch == config.epochs or stopped_on_convergence
+        ):
+            metadata["last_checkpoint_epoch"] = epoch
+            metadata["last_checkpoint_step"] = global_step
+            elapsed = round(time.perf_counter()-started, 3)
+            payload = {
+                "format_version": 1, "identity": checkpoint_identity(config),
+                "epoch": epoch, "step": global_step, "consecutive": consecutive,
+                "model": model.state_dict(), "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "python_rng": random.getstate(), "numpy_rng": np.random.get_state(),
+                "torch_rng": torch.get_rng_state(),
+                "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                "loader_rng": train_loader.generator.get_state(),
+                "metadata": metadata.copy(), "elapsed_seconds": elapsed,
+                "logs": {name: (out / name).read_bytes() for name in ("steps.csv", "epochs.csv")},
+            }
+            atomic_save_checkpoint(payload, Path(config.checkpoint_path))
+            print(f"  CHECKPOINT epoch={epoch} step={global_step} -> {config.checkpoint_path}", flush=True)
         if reached_budget or stopped_on_convergence:
             break
     metadata["completed"] = True
@@ -243,6 +332,9 @@ def main() -> None:
     parser.add_argument("--data-root", default="data")
     parser.add_argument("--output-dir", default="results/pilot")
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--resume-checkpoint")
+    parser.add_argument("--checkpoint-path")
+    parser.add_argument("--checkpoint-interval", type=int, default=5)
     run(TrainConfig(**vars(parser.parse_args())))
 
 
