@@ -1,0 +1,4 @@
+run_dir,status,model,condition,corruption_probability,train_subset,epochs_requested,total_steps,convergence_detection_step,final_epoch,final_train_ce,final_train_error,final_test_ce,final_test_error,elapsed_seconds,parameter_count,observed_label_change_rate
+benchmark\alexnet,complete,alexnet,original,0.0,,1,391,,1,1.206955874786377,0.43408,1.22898686542511,0.43620000000000003,150.104,1387786,0.0
+benchmark\inception,complete,inception,original,0.0,,1,391,,1,1.3766270930480957,0.46928000000000003,1.4088864658355713,0.4748,736.333,1661610,0.0
+benchmark\mlp,complete,mlp,original,0.0,,1,391,,1,1.4248271058654784,0.5029399999999999,1.5156099063873292,0.5384,12.577,1209866,0.0
