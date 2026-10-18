@@ -54,7 +54,9 @@ def jobs_for(preset: str, models: list[str], probabilities: list[float]) -> list
     if preset == "input":
         return [Job(m, c, 0.0, "input") for m in models for c in INPUT_CONDITIONS]
     if preset == "full":
-        return jobs_for("label", models, probabilities) + jobs_for("input", models, probabilities)
+        # Stable model-major ordering: nine experiments per model with default probabilities.
+        return [job for m in models for job in
+                (jobs_for("label", [m], probabilities) + jobs_for("input", [m], probabilities))]
     raise ValueError(f"Unknown preset: {preset}")
 
 
@@ -121,6 +123,7 @@ def summarize(output_root: Path) -> int:
             "final_test_ce": last.get("test_ce", "") if last else "",
             "final_test_error": last.get("test_error", "") if last else "",
             "elapsed_seconds": meta.get("elapsed_seconds", ""),
+            "stop_reason": meta.get("stop_reason", "legacy_epoch_limit"),
             "parameter_count": meta.get("parameter_count", ""),
             "observed_label_change_rate": meta.get("observed_label_change_rate", ""),
         })
@@ -154,6 +157,7 @@ def expected_config(args: argparse.Namespace, job: Job, epochs: int) -> dict:
         "lr_decay": args.lr_decay,
         "convergence_error": args.convergence_error,
         "convergence_patience": args.convergence_patience,
+        "stop_on_convergence": args.stop_on_convergence,
         "seed": args.seed,
         "label_seed": args.label_seed,
         "input_seed": args.input_seed,
@@ -170,17 +174,28 @@ def matching_complete(folder: Path, expected: dict) -> bool:
         metadata = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
         cfg = metadata["config"]
         # output_dir is intentionally excluded: local and Drive paths differ.
-        if any(cfg.get(key) != value for key, value in expected.items()):
-            return False
+        for key, value in expected.items():
+            if key == "stop_on_convergence" and key not in cfg:
+                # Legacy full-length runs remain valid measurements and are
+                # preserved, even though they were not stopped at convergence.
+                continue
+            if cfg.get(key) != value:
+                return False
         last = read_last_epoch(folder / "epochs.csv")
         if not last:
             return False
         final_epoch = int(last["epoch"])
         if expected["max_steps"] is None and final_epoch != expected["epochs"]:
-            return False
+            if not (expected["stop_on_convergence"] and
+                    metadata.get("stop_reason") == "converged" and
+                    metadata.get("convergence_step") is not None and
+                    int(metadata["convergence_step"]) == int(metadata["total_steps"])):
+                return False
         if expected["max_steps"] is not None and int(metadata["total_steps"]) != expected["max_steps"]:
-            # Training may end naturally before a larger max_steps limit.
-            if final_epoch != expected["epochs"]:
+            # Training may stop on convergence before a larger max_steps limit.
+            if final_epoch != expected["epochs"] and not (
+                expected["stop_on_convergence"] and metadata.get("stop_reason") == "converged"
+            ):
                 return False
         if int(last["step"]) != int(metadata["total_steps"]):
             return False
@@ -247,6 +262,8 @@ def command_for(args: argparse.Namespace, job: Job, epochs: int, folder: Path) -
                         ("--learning-rate", args.learning_rate)):
         if value is not None:
             cmd.extend((flag, str(value)))
+    if args.stop_on_convergence:
+        cmd.append("--stop-on-convergence")
     return cmd
 
 
@@ -266,6 +283,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr-decay", type=float, default=0.95)
     parser.add_argument("--convergence-error", type=float, default=0.001)
     parser.add_argument("--convergence-patience", type=int, default=2)
+    parser.add_argument("--stop-on-convergence", action=argparse.BooleanOptionalAction,
+                        default=True, help="Stop when training error meets convergence criterion")
+    parser.add_argument("--experiment-index", type=int, default=None,
+                        help="1-based index in canonical --preset full 27-job order; use --list-experiments")
+    parser.add_argument("--list-experiments", action="store_true",
+                        help="Print canonical experiment indices and exit")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--label-seed", type=int, default=1234)
     parser.add_argument("--input-seed", type=int, default=5678)
@@ -290,6 +313,16 @@ def main() -> None:
     backup = Path(args.backup_root).resolve() if args.backup_root else None
     if backup and (root == backup or root in backup.parents or backup in root.parents):
         raise SystemExit("--output-root and --backup-root must be separate, non-nested directories")
+    if args.experiment_index is not None or args.list_experiments:
+        if args.preset != "full" or args.models != list(MODELS) or args.probabilities != list(DEFAULT_CORRUPTION):
+            raise SystemExit("--experiment-index/--list-experiments require --preset full with default models and probabilities")
+        canonical = jobs_for("full", list(MODELS), list(DEFAULT_CORRUPTION))
+        if args.list_experiments:
+            for i, job in enumerate(canonical, 1):
+                print(f"{i:2d}: {job.model:9s} {job.tag:5s} {job.condition:19s} p={job.probability:g}")
+            return
+        if not 1 <= args.experiment_index <= len(canonical):
+            raise SystemExit(f"--experiment-index must be between 1 and {len(canonical)}")
     if args.summarize_only:
         summarize(backup if backup else root)
         return
@@ -303,6 +336,9 @@ def main() -> None:
         raise SystemExit("--batch-size and --eval-interval must be positive")
     epochs = args.epochs if args.epochs is not None else (1 if args.preset == "benchmark" else 100)
     jobs = jobs_for(args.preset, args.models, args.probabilities)
+    if args.experiment_index is not None:
+        jobs = [jobs[args.experiment_index - 1]]
+        print(f"Selected canonical experiment #{args.experiment_index}", flush=True)
     print(f"Preset={args.preset}; jobs={len(jobs)}; epochs={epochs}; batch_size={args.batch_size}; "
           f"subset={args.train_subset or 'full'}; device={args.device}", flush=True)
     print(f"Local output: {root}", flush=True)

@@ -39,6 +39,7 @@ class TrainConfig:
     lr_decay: float = 0.95
     convergence_error: float = 0.001
     convergence_patience: int = 2
+    stop_on_convergence: bool = False
     seed: int = 42
     label_seed: int = 1234
     input_seed: int = 5678
@@ -159,6 +160,7 @@ def run(config: TrainConfig) -> None:
     consecutive = 0
     started = time.perf_counter()
     reached_budget = False
+    stopped_on_convergence = False
     for epoch in range(1, config.epochs + 1):
         model.train()
         for inputs, targets in train_loader:
@@ -201,10 +203,16 @@ def run(config: TrainConfig) -> None:
             if converged and metadata["convergence_step"] is None:
                 # The actual crossing occurred between evaluations; this is its detection step.
                 metadata["convergence_step"] = global_step
-        if reached_budget:
+            if converged and config.stop_on_convergence:
+                stopped_on_convergence = True
+                print(f"Early stop: convergence confirmed at epoch {epoch}, step {global_step}", flush=True)
+        if reached_budget or stopped_on_convergence:
             break
     metadata["completed"] = True
     metadata["total_steps"] = global_step
+    metadata["stopped_on_convergence"] = stopped_on_convergence
+    metadata["stop_reason"] = ("converged" if stopped_on_convergence else
+                               "max_steps" if reached_budget else "epoch_limit")
     metadata["elapsed_seconds"] = round(time.perf_counter()-started, 3)
     (out / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print(f"Finished {global_step} steps in {metadata['elapsed_seconds']}s. "
@@ -226,6 +234,8 @@ def main() -> None:
     parser.add_argument("--lr-decay", type=float, default=0.95)
     parser.add_argument("--convergence-error", type=float, default=0.001)
     parser.add_argument("--convergence-patience", type=int, default=2)
+    parser.add_argument("--stop-on-convergence", action="store_true",
+                        help="Stop after convergence criterion is satisfied at evaluation")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--label-seed", type=int, default=1234)
     parser.add_argument("--input-seed", type=int, default=5678)
