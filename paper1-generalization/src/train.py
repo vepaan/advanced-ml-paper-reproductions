@@ -61,7 +61,7 @@ def set_seed(seed: int) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     # CPU deterministic operations; CUDA may require further platform settings.
-    torch.use_deterministic_algorithms(True)
+    torch.use_deterministic_algorithms(True, warn_only=True)
 
 
 def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dict:

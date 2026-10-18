@@ -1,2 +1,0 @@
-epoch,step,train_ce,train_error,test_ce,test_error,converged,elapsed_seconds
-1,391,1.206955874786377,0.43408,1.22898686542511,0.43620000000000003,0,150.102
