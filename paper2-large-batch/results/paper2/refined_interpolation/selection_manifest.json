@@ -1,0 +1,44 @@
+{
+  "F1_SB_seed42": {
+    "source": "current",
+    "epoch": 50,
+    "train_loss": 0.0040952268533408645,
+    "train_accuracy": 0.99875,
+    "test_accuracy": 0.9823
+  },
+  "F1_LB_seed42": {
+    "source": "current",
+    "epoch": 30,
+    "train_loss": 0.0001564559830352664,
+    "train_accuracy": 1.0,
+    "test_accuracy": 0.9837
+  },
+  "C1_SB_seed42": {
+    "source": "refined_training_lr2e4",
+    "epoch": 120,
+    "train_loss": 0.001296828486919403,
+    "train_accuracy": 0.99974,
+    "test_accuracy": 0.7053
+  },
+  "C1_LB_seed42": {
+    "source": "refined_training_lr2e4",
+    "epoch": 120,
+    "train_loss": 0.021280108032226564,
+    "train_accuracy": 0.99676,
+    "test_accuracy": 0.6638
+  },
+  "C2_SB_seed42": {
+    "source": "baseline_50_epochs",
+    "epoch": 50,
+    "train_loss": 0.02211242569923401,
+    "train_accuracy": 0.99318,
+    "test_accuracy": 0.8556
+  },
+  "C2_LB_seed42": {
+    "source": "baseline_50_epochs",
+    "epoch": 50,
+    "train_loss": 0.05212058067321777,
+    "train_accuracy": 0.9825,
+    "test_accuracy": 0.7974
+  }
+}

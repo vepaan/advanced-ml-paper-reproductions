@@ -1,29 +1,79 @@
-# Paper 2 / Figure 3 — independent, compute-conscious MVP
+# Paper 2 — Large-Batch Training: Figure 3 Reproduction
 
-**Place the six Python files in `paper2-large-batch/src/` and retain this README under `paper2-large-batch/`.** No pretrained models or architecture reference code used. All figures must derive from measured data.
+Independent PyTorch reproduction of **Figure 3(a) F1, (c) C1, and (d) C2** from Keskar et al., *On Large-Batch Training for Deep Learning: Generalization Gap and Sharp Minima* (ICLR 2017), for CS 6362 Assignment 2.
 
-## Environment
+**Phase 3 status:** completed independent implementation and measured interpolation experiments. No author implementation or external reproduction code was consulted during this phase. The curves are computed from trained networks, not hardcoded to match the paper.
 
-Run from the **`paper2-large-batch`** directory (same Python environment as Paper 1 is sufficient):
+## Scope and experiment
 
-```powershell
-python -m pip install torch numpy
+| Panel | Network | Dataset | Training examples | SB batch | LB batch |
+| --- | --- | --- | ---: | ---: | ---: |
+| F1 | Five-hidden-layer, 512-unit batch-normalized MLP | MNIST | 60,000 | 256 | 6,000 |
+| C1 | Shallow AlexNet-inspired convolutional network | CIFAR-10 | 50,000 | 256 | 5,000 |
+| C2 | Deep VGG-inspired convolutional network | CIFAR-10 | 50,000 | 256 | 5,000 |
+
+Both regimes use **Adam**. The initial learning rate is **0.001**; the C1 SB/LB models were later resumed from epoch 50 with learning rate **0.0002** until epoch 120, retaining their optimizer state. Both regimes start from the **same initialization** within a panel (seed 42), an explicit reproduction choice.
+
+For each network, evaluate the mean train/test cross-entropy and classification accuracy along
+
+\[
+\theta(\alpha)=(1-\alpha)\theta_{\mathrm{SB}}+\alpha\theta_{\mathrm{LB}},
+\qquad \alpha\in[-1,2].
+\]
+
+The final experiment measures **61 equally spaced points**, including exact endpoints \(\alpha=0\) (SB) and \(\alpha=1\) (LB). No curve values are interpolated by the plotting notebook; each point is a model evaluation.
+
+**BatchNorm choice:** reset and recompute running statistics at each interpolated weight configuration using the first **4,096 training examples**, with gradients disabled and dropout inactive. The full train/test splits are then evaluated. A separate diagnostic with linearly interpolated running statistics was unstable (including NaN losses during extrapolation); it is **not** used for the final figure. The 4,096-example recalibration policy is our implementation choice, not a claim about the paper's exact procedure.
+
+## Repository layout
+
+```text
+paper2-large-batch/
+├── README.md
+├── src/
+│   ├── data.py
+│   ├── models.py
+│   ├── train.py
+│   ├── interpolate.py
+│   └── validate.py
+├── notebooks/
+│   └── reproduce_figure3.ipynb
+└── results/
+    └── final_61/
+        ├── F1_interpolation.json
+        ├── C1_interpolation.json
+        ├── C2_interpolation.json
+        └── selection_manifest.json
 ```
 
-### Manual MNIST download (avoids Python HTTPS / SSL)
+`results/final_61/` is the **minimal data needed to regenerate the plots**. It does **not** contain the six model checkpoints needed to rerun interpolation. Original and refined `endpoint.pt` / `last.pt` files and intermediate runs are archived separately on Google Drive under `MyDrive/ML-Paper-Reproductions/paper2/`. Do not delete that archive if you want to recompute Figure 3 from trained weights or resume training.
 
-From `paper2-large-batch` in **PowerShell**:
+## Plot Figure 3 locally
+
+1. Place the four final JSON files under `paper2-large-batch/results/final_61/`.
+2. Open `paper2-large-batch/notebooks/reproduce_figure3.ipynb` in Jupyter or VS Code.
+3. Run the cells in order.
+
+The notebook follows the Paper 1 notebook conventions: it locates `results/final_61/` relative to the working directory, reads **measured data only**, and displays panels **F1, C1, C2** inline. It does not retrain models or generate new interpolation measurements. Blue curves represent cross-entropy (left axis), red curves accuracy (right axis); solid lines are training and dashed lines testing.
+
+## Environment and datasets
+
+From `paper2-large-batch/`:
+
+```powershell
+python -m pip install torch numpy matplotlib jupyter
+```
+
+For F1, obtain `data/mnist.npz` with arrays `x_train`, `y_train`, `x_test`, `y_test`:
 
 ```powershell
 New-Item -ItemType Directory -Force data | Out-Null
 curl.exe -L --fail --retry 3 "https://storage.googleapis.com/tensorflow/tf-keras-datasets/mnist.npz" -o "data/mnist.npz"
 ```
 
-This is the MNIST **dataset archive**, not an existing implementation. The data loader reads `x_train`, `y_train`, `x_test`, `y_test` directly and scales uint8 pixels by 255. It never runs Python network requests.
+For C1/C2, the default CIFAR-10 location is `../paper1-generalization/data/cifar-10-batches-py/`. Supply `--cifar-root` when using another location. MNIST and CIFAR-10 pixels are scaled to `[0,1]`; there is no cropping, per-image whitening, or data augmentation.
 
-CIFAR-10: default path `../paper1-generalization/data/cifar-10-batches-py/` (unmodified **original 32×32** images, not Paper 1's cropped/whitened transforms). If your archive is elsewhere, pass `--cifar-root PATH` to every command.
-
-## Validate data and architectures first
+Check the setup:
 
 ```powershell
 python src/data.py --panel F1
@@ -31,52 +81,58 @@ python src/data.py --panel C1
 python src/validate.py --panel all --data
 ```
 
-## Benchmark before authorizing training
+## Training and checkpointing
 
-Run **on Colab GPU**, once per panel/regime, from repo's `paper2-large-batch/` directory:
-
-```bash
-for panel in F1 C1 C2; do
-  for regime in SB LB; do
-    python src/train.py --mode benchmark --panel "$panel" --regime "$regime" --device cuda --bench-steps 8
-  done
-done
-```
-
-The benchmark prints time per 8 steps, throughput, fetch overhead, estimated **single epoch** duration, and peak allocated GPU memory. It is preliminary (warm-up, eval, BN calibration, Drive time excluded); please send these six outputs for a real total runtime/epoch-budget decision. **Do not launch full runs yet.** Any C2_LB CUDA OOM is important evidence; do not silently switch to gradient accumulation, as this changes BatchNorm statistics.
-
-Windows PowerShell equivalent (GPU only if supported):
-
-```powershell
-foreach ($panel in @('F1','C1','C2')) { foreach ($regime in @('SB','LB')) { python src/train.py --mode benchmark --panel $panel --regime $regime --device auto --bench-steps 8 } }
-```
-
-Quick single-step sanity test: `python src/train.py --mode smoke --panel F1 --regime SB`.
-
-## Commands reserved for after benchmark approval
-
-Example one run:
+Example initial small-batch run:
 
 ```bash
-python src/train.py --mode train --panel F1 --regime SB --device cuda --max-epochs 40 --output-root /content/paper2_runs
+python src/train.py --mode train --panel C1 --regime SB --device cuda --seed 42 --max-epochs 50 --output-root results/training
 ```
 
-Change `--panel` and `--regime` for all six. `--max-epochs 40` is only a provisional safety cap, **not** an approved or scientifically established convergence budget. Every 5 epochs a fixed first-2048 sample train/test diagnostic is measured, and patience is tested on probe train loss. Full train/test evaluation runs once at the end. Stopping status explicitly distinguishes `loss_plateau` vs `budget_exhausted`. Saved locally per epoch: `last.pt` (weights, Adam, RNG, epoch), final `endpoint.pt` and `metrics.json`. Copy run folders to Drive after checkpoints or at the end; no Drive writes occur in the inner training loop. Re-invoking same run resumes at epoch boundary.
+Replace `C1` and `SB` to train other panels and regimes. Batch sizes are assigned automatically. `last.pt` contains the model, Adam state, RNG states, and history for epoch-boundary resumption; `endpoint.pt` holds the model weights for inference; `metrics.json` contains recorded metrics.
 
-**Current limitations, intentionally disclosed:** This is an MVP, not a fully validated scientific reproduction. The paper omits several architectural specifics; our independent choices are documented in `models.py`. The optimizer uses Adam lr=0.001 as an assumed default, not a confirmed paper hyperparameter. Loss stabilization on a fixed training prefix is an approximate diagnostic; confirm comparable SB/LB train loss and high train accuracy before accepting endpoints. C2_LB may OOM on a T4/A100 due to true 5,000-example BatchNorm batches. DataLoader workers=0 is deliberate because all decoded tensors are cached in RAM, so extra workers may be slower; benchmarking reports batch fetching overhead. No AMP or gradient accumulation is enabled because they can affect methodology.
-
-## After accepted endpoints (not needed yet)
+**Example C1 fine-tuning continuation** (only after placing the original epoch-50 `last.pt` in the matching output folder):
 
 ```bash
-python src/interpolate.py --panel F1 --device cuda --output-root /content/paper2_runs --bn-policy recalibrate --points 21
+python src/train.py --mode train --panel C1 --regime SB --device cuda --seed 42 --max-epochs 120 --resume-lr 0.0002 --patience 1000 --output-root results/refined
 ```
 
-That script uses all train/test samples for each alpha and outputs measured `F1_interpolation.json` (similarly C1/C2). It interpolates floating-point state entries (trainable weights and, initially, floating buffers). `recalibrate` overwrites BatchNorm running estimates using an explicitly reported 4,096-example training prefix and no gradient updates; `interpolate` uses linearly interpolated floating BN buffers instead. The chosen BN policy is **our reproduction choice**, not confirmed as the paper's. Since the paper's interpolation behavior is sensitive to this decision, choose deliberately; interpolation itself may be expensive and should be separately benchmarked. No plot notebook is included yet, as requested.
+To reproduce the recorded continuation, first copy the baseline `C1_SB_seed42/` checkpoint directory to `results/refined/`; repeat independently for LB. `--max-epochs 120` is a **total** epoch limit, not 120 additional epochs. The learning-rate change is logged as a new stage.
 
-## Efficiency revision (2026-10-19)
+**Limitation:** the default early stopping rule watches loss on a fixed 2,048-example prefix every five epochs and can stop before the entire training set is closely fitted. The refined C1 runs used an extended budget with plateau stopping effectively disabled. The final checkpoint selection is recorded in `selection_manifest.json`; it was based on training fit, not plot resemblance or test-set tuning.
 
-- Accumulate training loss on the active device, with one scalar synchronization per epoch instead of per batch.
-- Write recovery checkpoints every 5 epochs by default (`--checkpoint-every`), plus at stopping or reaching the budget cap.
-- Budget exhaustion is **not** tagged as convergence; increasing `--max-epochs` resumes from the checkpoint.
-- The 2,048-example fixed probes remain every 5 epochs by default. Final and interpolation metrics use the complete datasets.
-- Benchmarks must be executed on CUDA before allocating full budgets; CPU C2 is not a relevant proxy for A100 throughput.
+## Rerun interpolation (requires archived checkpoints)
+
+For a panel, restore both selected `endpoint.pt` files into a common output root:
+
+```text
+results/selected_endpoints/
+├── C1_SB_seed42/endpoint.pt
+└── C1_LB_seed42/endpoint.pt
+```
+
+Then run on a GPU-capable environment:
+
+```bash
+python src/interpolate.py --panel C1 --device cuda --output-root results/selected_endpoints --points 61 --bn-policy recalibrate --bn-examples 4096 --eval-batch 512
+```
+
+The script writes `C1_interpolation.json` to that root. Repeat for F1/C2 using their selected checkpoint pairs. It runs actual full-dataset forward evaluations; `--points 61` changes measurement resolution, not training.
+
+## Phase 3 observations and limitations
+
+Final **61-point recalibrated** endpoint measurements:
+
+| Panel | SB train acc. | LB train acc. | SB test acc. | LB test acc. |
+| --- | ---: | ---: | ---: | ---: |
+| F1 | 99.823% | 100.000% | 98.15% | 98.38% |
+| C1 | 99.988% | 99.794% | 70.79% | 66.44% |
+| C2 | 99.718% | 99.610% | 86.50% | 81.10% |
+
+The interpolation profiles qualitatively show different sensitivity around the SB/LB solutions, especially for C1/C2. The results **do not exactly reproduce** the published curves or test accuracies; F1 also does not show an SB test-accuracy advantage. Differences may arise from architecture assumptions, optimization and endpoint selection, shared initialization, and BN recalibration. These are observed deviations, **not data to adjust by hand**.
+
+The paper reports five trials for its summary statistics; this project used one seed and one SB/LB pair per panel. The 1D plots describe the loss on **one parameter-space direction** and are not a global proof of sharpness.
+
+## Phase boundary
+
+This README documents the **independent Phase 3** work. Any later inspection of author code or changes made in Phase 4 should be clearly identified separately and should not overwrite the Phase 3 measurements or their provenance.
