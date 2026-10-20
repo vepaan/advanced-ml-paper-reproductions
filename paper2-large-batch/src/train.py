@@ -31,12 +31,15 @@ def run(a):
     if a.batch_override is not None:batch=a.batch_override
     model=create(a.panel).to(device)
     optim=torch.optim.Adam(model.parameters(),lr=a.lr)
+    # Base training configuration remains unchanged across a resume-LR stage.
     config={'panel':a.panel,'regime':a.regime,'seed':a.seed,'batch':batch,'lr':a.lr,
             'data':'raw/255, no crop, no augmentation','architecture_version':'independent-v1'}
     root=Path(a.output_root)/f'{a.panel}_{a.regime}_seed{a.seed}'
     if a.mode=='train':root.mkdir(parents=True,exist_ok=True)
     ck=root/'last.pt';epoch0=0;history=[];best=float('inf');bad=0
+    lr_stages=[]
     if a.mode=='train' and a.checkpoint_every < 1:raise ValueError('checkpoint-every must be >= 1')
+    if a.resume_lr is not None and a.resume_lr <= 0:raise ValueError('--resume-lr must be > 0')
     if a.mode=='train' and ck.exists():
         state=torch.load(ck,map_location='cpu',weights_only=False)
         if state['config']!=config:raise RuntimeError('Checkpoint configuration differs; use separate output root')
@@ -46,10 +49,26 @@ def run(a):
             print('Budget exhausted at requested epoch cap. Increase --max-epochs to continue.');return
         model.load_state_dict(state['model']);optim.load_state_dict(state['optimizer'])
         epoch0=state['epoch'];history=state['history'];best=state['best'];bad=state['bad']
+        lr_stages=list(state.get('lr_stages', []))
+        # Apply a new LR stage only if the optimizer is not already at the requested LR.
+        if a.resume_lr is not None:
+            previous_lr=float(optim.param_groups[0]['lr'])
+            if any(abs(float(g['lr'])-previous_lr)>1e-12 for g in optim.param_groups):
+                raise RuntimeError('Unexpected different learning rates in optimizer groups')
+            if abs(previous_lr-a.resume_lr)>1e-12:
+                for group in optim.param_groups:group['lr']=a.resume_lr
+                lr_stages.append({'after_epoch':epoch0,'from_lr':previous_lr,'to_lr':a.resume_lr})
+                # A new learning-rate phase gets its own plateau tracking baseline.
+                best=float('inf');bad=0
+                print(f'New LR stage after epoch {epoch0}: {previous_lr} -> {a.resume_lr}',flush=True)
+            else:
+                print('Continuing existing LR stage:',a.resume_lr,flush=True)
         torch.set_rng_state(state['torch_rng'])
         if torch.cuda.is_available() and state.get('cuda_rng') is not None:torch.cuda.set_rng_state_all(state['cuda_rng'])
         np.random.set_state(state['numpy_rng']);random.setstate(state['python_rng'])
-        print('Resuming after epoch',epoch0)
+        print('Resuming after epoch',epoch0,flush=True)
+    elif a.resume_lr is not None and a.mode=='train':
+        raise RuntimeError('--resume-lr requires an existing last.pt checkpoint; refusing fresh training')
     print('RUN',config,'device',device,'params',sum(p.numel() for p in model.parameters()),flush=True)
     if device=='cuda':print('GPU',torch.cuda.get_device_name(),'allocated',round(torch.cuda.memory_allocated()/1e9,2),'GB',flush=True)
     if a.mode=='benchmark':
@@ -104,13 +123,15 @@ def run(a):
             save={'config':config,'epoch':epoch,'history':history,'best':best,'bad':bad,
                   'model':model.state_dict(),'optimizer':optim.state_dict(),
                   'torch_rng':torch.get_rng_state(),'cuda_rng':torch.cuda.get_rng_state_all() if device=='cuda' else None,
-                  'numpy_rng':np.random.get_state(),'python_rng':random.getstate(),'finished':finished}
+                  'numpy_rng':np.random.get_state(),'python_rng':random.getstate(),'finished':finished,
+                  'lr_stages':lr_stages}
             tmp=ck.with_suffix('.tmp');torch.save(save,tmp);os.replace(tmp,ck)
         if finished:
             stop_reason='loss_plateau' if converged else 'budget_exhausted';break
     final={'config':config,'epoch':epoch,'stop_reason':stop_reason,'elapsed_s':time.monotonic()-start,
            'train':eval_model(model,ds_train,a.eval_batch,device),'test':eval_model(model,ds_test,a.eval_batch,device),
-           'history':history,'batchnorm_policy':'trained running stats; interpolation separately recalibrates'}
+           'history':history,'batchnorm_policy':'trained running stats; interpolation separately recalibrates',
+           'lr_stages':lr_stages,'final_optimizer_lr':optim.param_groups[0]['lr']}
     (root/'metrics.json').write_text(json.dumps(final,indent=2))
     print('FINAL',json.dumps({k:v for k,v in final.items() if k!='history'},indent=2))
     # Explicitly exclude optimizer from compact inference checkpoint.
@@ -124,6 +145,7 @@ def parse():
     p.add_argument('--device',default='auto');p.add_argument('--seed',type=int,default=42)
     p.add_argument('--cifar-root');p.add_argument('--mnist-file');p.add_argument('--output-root',default='results')
     p.add_argument('--lr',type=float,default=0.001)
+    p.add_argument('--resume-lr',type=float,default=None,help='Change Adam LR on resume; requires existing last.pt')
     p.add_argument('--bench-steps',type=int,default=8)
     p.add_argument('--max-epochs',type=int,default=40);p.add_argument('--min-epochs',type=int,default=15)
     p.add_argument('--eval-every',type=int,default=5);p.add_argument('--patience',type=int,default=4)
