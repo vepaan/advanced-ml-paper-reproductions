@@ -1,1 +1,2 @@
 paper3-beta-vae/results/seed42/**/*.pt filter=lfs diff=lfs merge=lfs -text
+paper3-beta-vae/results/phase4/**/*.pt filter=lfs diff=lfs merge=lfs -text
