@@ -137,7 +137,7 @@ def draw_panel(panel, ax, label, limits):
     for c, j in enumerate(dims):
         im = ax[0, c].imshow(
             response['position_mean'][:, :, j], origin='lower',
-            cmap='coolwarm',
+            cmap='jet',
             norm=TwoSlopeNorm(vmin=-limits['position_mean'], vcenter=0.0,
                               vmax=limits['position_mean']),
             interpolation='nearest',
