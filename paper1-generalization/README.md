@@ -12,9 +12,7 @@ paper1-generalization/
 │   ├── data.py                 # CIFAR-10 preprocessing and randomization
 │   ├── models.py               # MLP, AlexNet, and Small Inception
 │   ├── train.py                # Training, evaluation, and checkpointing
-│   ├── experiments.py          # Experiment orchestration (indices 1–27)
-│   ├── plot.py                 # Standalone plotting utility
-│   └── ...                     # Architecture audits and helper scripts
+│   └── experiments.py          # Experiment orchestration (indices 1–27)
 ├── notebooks/
 │   ├── reproduce_figure1.ipynb
 │   └── reproduce_figure1_threshold_1pct.ipynb
@@ -38,7 +36,7 @@ Training uses PyTorch, SGD with momentum, and the learning-rate schedule describ
 Install the dependencies:
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 Open either notebook in `notebooks/` and run all cells. The notebooks read the existing data from `results/figure1/` and display the figures inline. **No retraining is required.**

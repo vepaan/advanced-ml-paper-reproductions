@@ -46,15 +46,15 @@ paper2-large-batch/
         └── selection_manifest.json
 ```
 
-`results/final_61/` is the **minimal data needed to regenerate the plots**. It does **not** contain the six model checkpoints needed to rerun interpolation. Original and refined `endpoint.pt` / `last.pt` files and intermediate runs are archived separately on Google Drive under `MyDrive/ML-Paper-Reproductions/paper2/`. Do not delete that archive if you want to recompute Figure 3 from trained weights or resume training.
+`results/paper2/final_61/` is the **minimal data needed to regenerate the plots**. It does **not** contain the six model checkpoints needed to rerun interpolation. Original and refined `endpoint.pt` / `last.pt` files and intermediate runs are archived separately on Google Drive under `MyDrive/ML-Paper-Reproductions/paper2/`. Do not delete that archive if you want to recompute Figure 3 from trained weights or resume training.
 
 ## Plot Figure 3 locally
 
-1. Place the four final JSON files under `paper2-large-batch/results/final_61/`.
+1. Place the four final JSON files under `paper2-large-batch/results/paper2/final_61/`.
 2. Open `paper2-large-batch/notebooks/reproduce_figure3.ipynb` in Jupyter or VS Code.
 3. Run the cells in order.
 
-The notebook follows the Paper 1 notebook conventions: it locates `results/final_61/` relative to the working directory, reads **measured data only**, and displays panels **F1, C1, C2** inline. It does not retrain models or generate new interpolation measurements. Blue curves represent cross-entropy (left axis), red curves accuracy (right axis); solid lines are training and dashed lines testing.
+The notebook follows the Paper 1 notebook conventions: it locates `results/paper2/final_61/` relative to the working directory, reads **measured data only**, and displays panels **F1, C1, C2** inline. It does not retrain models or generate new interpolation measurements. Blue curves represent cross-entropy (left axis), red curves accuracy (right axis); solid lines are training and dashed lines testing.
 
 ## Environment and datasets
 
